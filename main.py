@@ -373,7 +373,16 @@ def warm_tail() -> str:
 
 
 def user_link(uid, name) -> str:
-    return f'<a href="tg://user?id={uid}">{esc(clip(name or f"ID {uid}", 40))}</a>'
+    """Ism ustiga bosilsa — shu foydalanuvchini boshqarish oynasi (premium, xabar, ban...) ochiladi."""
+    label = esc(clip(name or f"ID {uid}", 40))
+    if BOT_USERNAME:
+        return f'<a href="https://t.me/{BOT_USERNAME}?start=adm_{uid}">{label}</a>'
+    return f'<a href="tg://user?id={uid}">{label}</a>'
+
+
+def prof_link(uid) -> str:
+    """🆔 raqam ustiga bosilsa — foydalanuvchining Telegram profili ochiladi (username bo'lmasa ham)."""
+    return f'<a href="tg://user?id={uid}">🆔 {uid}</a>'
 
 
 def uname_of(u: dict) -> str:
@@ -549,18 +558,49 @@ def webapp_url(uid: Optional[int] = None) -> str:
     return urlunsplit((sp.scheme, sp.netloc, sp.path or "/", urlencode(base), ""))
 
 
+def _btn(text: str, style=None, **kw) -> InlineKeyboardButton:
+    """Tugma yaratadi. style: 'primary' (ko'k), 'success' (yashil), 'danger' (qizil).
+    Eski aiogram/Telegram rangni qo'llamasa ham xato bermaydi — oddiy tugma bo'lib qoladi."""
+    if style:
+        try:
+            return InlineKeyboardButton(text=text, style=style, **kw)
+        except Exception:
+            pass
+    return InlineKeyboardButton(text=text, **kw)
+
+
+STYLE_CYCLE = ("primary", "success", "danger")  # ko'k, yashil, qizil
+
+
+def _kbtn(text: str, style=None, **kw) -> KeyboardButton:
+    """Pastdagi (reply) menyu tugmasi. Telegram eski bo'lsa rang shunchaki e'tiborsiz qoladi."""
+    if style:
+        try:
+            return KeyboardButton(text=text, style=style, **kw)
+        except Exception:
+            pass
+    return KeyboardButton(text=text, **kw)
+
+
 def ikb(rows) -> InlineKeyboardMarkup:
-    """rows: [[(text, 'cb:data' | ('url', 'https://..') | ('web', 'https://..')), ...], ...]"""
+    """rows: [[(text, 'cb:data' | ('url', '...') | ('web', '...'), [style]), ...], ...]
+    style berilmasa tugmalar ko'k / yashil / qizil bo'lib navbatma-navbat bo'yaladi (har safar boshqacha boshlanadi).
+    Muhim joylar uchun style'ni o'zingiz yozing: 'primary' ko'k, 'success' yashil, 'danger' qizil."""
+    shift = random.randrange(len(STYLE_CYCLE))
+    n = 0
     kb = []
     for row in rows:
         r = []
-        for text, target in row:
+        for item in row:
+            text, target = item[0], item[1]
+            style = item[2] if len(item) > 2 and item[2] else STYLE_CYCLE[(shift + n) % len(STYLE_CYCLE)]
+            n += 1
             if isinstance(target, tuple) and target[0] == "web":
-                r.append(InlineKeyboardButton(text=text, web_app=WebAppInfo(url=target[1])))
+                r.append(_btn(text, style, web_app=WebAppInfo(url=target[1])))
             elif isinstance(target, tuple):
-                r.append(InlineKeyboardButton(text=text, url=target[1]))
+                r.append(_btn(text, style, url=target[1]))
             else:
-                r.append(InlineKeyboardButton(text=text, callback_data=target))
+                r.append(_btn(text, style, callback_data=target))
         kb.append(r)
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -659,9 +699,15 @@ async def typing(chat_id: int, action=ChatAction.TYPING):
 # =====================================================================
 
 def rk(rows):
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=b) for b in row] for row in rows], resize_keyboard=True,
-    )
+    shift = random.randrange(len(STYLE_CYCLE))
+    keyboard, n = [], 0
+    for row in rows:
+        r = []
+        for b in row:
+            r.append(_kbtn(b, STYLE_CYCLE[(shift + n) % len(STYLE_CYCLE)]))
+            n += 1
+        keyboard.append(r)
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 MAIN_ROWS = [
@@ -683,14 +729,22 @@ MAIN_ROWS = [
 
 
 def get_kb(uid: int):
-    keyboard = [[KeyboardButton(text=b) for b in row] for row in MAIN_ROWS]
+    """Asosiy menyu. Har safar ko'rsatilganda ranglar navbati o'zgaradi."""
+    shift = random.randrange(len(STYLE_CYCLE))
+    n = 0
     url = webapp_url(uid)
-    if url:  # Pomodoro yonida «🚀 OPEN APP» — ilovani ochadi
-        for row in keyboard:
-            if any(b.text == "🍅 POMODORO TIMER" for b in row):
-                row.append(KeyboardButton(text="🚀 OPEN APP", web_app=WebAppInfo(url=url)))
+    keyboard = []
+    for row in MAIN_ROWS:
+        r = []
+        for b in row:
+            r.append(_kbtn(b, STYLE_CYCLE[(shift + n) % len(STYLE_CYCLE)]))
+            n += 1
+        if url and "🍅 POMODORO TIMER" in row:  # Pomodoro yonida «🚀 OPEN APP» — ilovani ochadi
+            r.append(_kbtn("🚀 OPEN APP", STYLE_CYCLE[(shift + n) % len(STYLE_CYCLE)], web_app=WebAppInfo(url=url)))
+            n += 1
+        keyboard.append(r)
     if is_admin(uid):
-        keyboard.append([KeyboardButton(text="👨‍💼 ADMIN PANEL")])
+        keyboard.append([_kbtn("👨‍💼 ADMIN PANEL", "danger")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
@@ -1079,6 +1133,7 @@ BG_TASKS: set = set()
 QUIZ: dict = {}
 active_pomodoros: dict = {}
 pending_broadcast: dict = {}
+SCAN_RUNNING: set = set()
 
 
 def spawn(coro):
@@ -1383,6 +1438,11 @@ def payment_kb(req_id: int):
     ])
 
 
+def order_action_kb(req_id: int):
+    """Admin uchun: ✅ yashil / ❌ qizil tugmalar."""
+    return ikb([[("✅ Bajarildi", f"pr|ok|{req_id}", "success"), ("❌ Rad etish", f"pr|no|{req_id}", "danger")]])
+
+
 async def create_purchase(uid: int, product: str, details: str) -> dict:
     st = get_user(uid)
     p = PRODUCTS[product]
@@ -1414,11 +1474,11 @@ async def create_purchase(uid: int, product: str, details: str) -> dict:
         await notify_admins(
             f"🛒 <b>Yangi buyurtma #{req_id}</b>\n\n"
             f"👤 {user_link(uid, st.get('full_name'))} • {esc(uname_of(st))}\n"
-            f"🆔 <code>{uid}</code>\n"
+            f"{prof_link(uid)}\n"
             f"{p['emoji']} {esc(p['title'])}\n🧾 {esc(details)}\n"
             f"💳 Karta: <code>{esc(CARD_NUMBER)}</code> • {esc(CARD_OWNER)}\n\n"
             "📸 <i>Mijoz chek skrinshotini yuborganda alohida xabar bo'lib keladi.</i>",
-            ikb([[("✅ Bajarildi", f"pr|ok|{req_id}"), ("❌ Rad etish", f"pr|no|{req_id}")]]),
+            order_action_kb(req_id),
         )
     except Exception as e:
         log.warning("notify admins failed: %s", e)
@@ -1445,7 +1505,7 @@ async def place_order(message: Message, uid: int, key: str, details: str) -> dic
             await notify_admins(
                 f"⚠️ <b>Buyurtma #{req['id']} (zaxira rejim)</b>\n👤 {user_link(uid, req['full_name'])} • <code>{uid}</code>\n"
                 f"📦 {esc(PRODUCTS[key]['title'])} — {esc(details)}\n<code>{esc(clip(repr(e), 300))}</code>",
-                ikb([[("✅ Bajarildi", f"pr|ok|{req['id']}"), ("❌ Rad etish", f"pr|no|{req['id']}")]]),
+                order_action_kb(req["id"]),
             )
     text = payment_text(PRODUCTS[key]["title"], details, req["id"])
     sent = await send_html(message, text, payment_kb(req["id"]))
@@ -1471,13 +1531,13 @@ async def forward_receipt(message: Message, st: dict, req_id: int, file_id: str,
     caption = (
         f"🧾 <b>CHEK keldi — buyurtma #{req_id}</b>\n\n"
         f"👤 {user_link(uid, st.get('full_name'))} • {esc(uname_of(st))}\n"
-        f"🆔 <code>{uid}</code>\n"
+        f"{prof_link(uid)}\n"
         f"📦 {esc(req['service'])}\n🧾 {esc(req['details'])}\n"
         f"💳 {esc(CARD_NUMBER)} • {esc(CARD_OWNER)}\n"
         + (f"💬 Izoh: <i>{esc(note)}</i>\n" if note else "")
         + f"🕒 {ts()}"
     )
-    kb = ikb([[("✅ Bajarildi", f"pr|ok|{req_id}"), ("❌ Rad etish", f"pr|no|{req_id}")]])
+    kb = order_action_kb(req_id)
     delivered = 0
     for adm in ADMIN_IDS:
         try:
@@ -1591,10 +1651,14 @@ async def premium_pitch(message: Message, feature: str):
 async def start(message: Message):
     uid = message.from_user.id
     st = get_user(uid, message.from_user)
+    parts = (message.text or "").split()
+    if is_admin(uid) and len(parts) > 1 and parts[1].startswith("adm_") and parts[1][4:].isdigit():
+        text, kb = user_detail(parts[1][4:])  # admin ro'yxatdagi ism ustiga bosdi
+        await send_html(message, text, kb)
+        return
     st["mode"], st["sub"], st["awaiting"] = "ai_tutor", None, None
     first_time = not st.get("started")
     st["started"] = True
-    parts = (message.text or "").split()
 
     if first_time and len(parts) > 1 and parts[1].startswith("ref_"):
         try:
@@ -1985,7 +2049,7 @@ def game_q_text(z: dict) -> str:
 
 def game_q_kb(z: dict):
     o = z["q"]["opts"]
-    cells = [(f"{'ABCD'[i]}) {t}", f"gm|a|{z['tok']}|{i}") for i, t in enumerate(o)]
+    cells = [(f"{'ABCD'[i]}) {t}", f"gm|a|{z['tok']}|{i}", "primary") for i, t in enumerate(o)]
     return ikb([cells[i:i + 2] for i in range(0, len(cells), 2)] + [[("⬅️ O'yinlar", "gm|menu")]])
 
 
@@ -2176,7 +2240,7 @@ def quiz_kb(uid: int):
     z = QUIZ[uid]
     q = z["qs"][z["i"]]
     letters = "ABCD"
-    return ikb([[(f"{letters[i]}) {clip(o, 55)}", f"qz|{z['i']}|{i}")] for i, o in enumerate(q["options"])])
+    return ikb([[(f"{letters[i]}) {clip(o, 55)}", f"qz|{z['i']}|{i}", "primary")] for i, o in enumerate(q["options"])])
 
 
 async def send_quiz_question(message: Message, uid: int, new: bool = False):
@@ -2780,6 +2844,7 @@ async def on_my_chat_member(ev: ChatMemberUpdated):
             stayed = dur(time.time() - (st.get("joined_ts") or time.time()))
             await notify_admins(
                 f"😔 <b>Botni blokladi:</b> {user_link(uid, st.get('full_name'))} ({esc(uname_of(st))})\n"
+                f"{prof_link(uid)}\n"
                 f"🕒 {stayed} biz bilan bo'ldi • 💬 {st.get('queries_count', 0)} ta savol\n"
                 f"👉 /u_{uid}",
                 silent=True,
@@ -2798,8 +2863,6 @@ async def on_my_chat_member(ev: ChatMemberUpdated):
 # ADMIN PANEL (faqat ADMIN_IDS, PINsiz)
 # =====================================================================
 
-PER_PAGE = {"users": 7, "recent": 8, "blocked": 7, "questions": 8, "leads": 8, "purchases": 6, "referrals": 8, "feedbacks": 6}
-
 PANEL_FILTERS = {
     "users": [("all", "👥 Hammasi"), ("prem", "💎 Premium"), ("new", "🆕 Bugun"), ("nouser", "🕳 Usernamesiz")],
     "blocked": [("blocked", "🚫 Bloklaganlar"), ("banned", "⛔ Ban qilingan")],
@@ -2813,15 +2876,17 @@ def user_line(n: int, uid_str: str, u: dict) -> str:
     flags = (" 🚫" if u.get("bot_blocked") else "") + (" ⛔" if u.get("banned") else "")
     lvl, _, _ = level_of(u.get("points", 0))
     return (
-        f"<b>{n}.</b> {user_link(uid_str, u.get('full_name'))} • {esc(uname_of(u))}{flags}\n"
-        f"   🆔 <code>{uid_str}</code> • {badge} • Lv{lvl} • ⭐{u.get('points', 0)} • 💬{u.get('queries_count', 0)}\n"
-        f"   🗓 {esc((u.get('joined_at') or '—')[:16])} • 👁 {ago(u.get('last_seen'))}\n"
-        f"   👉 /u_{uid_str}"
+        f"<b>{n}.</b> {badge} {user_link(uid_str, u.get('full_name'))} • {esc(uname_of(u))}{flags}\n"
+        f"   {prof_link(uid_str)} • Lv{lvl} • ⭐{u.get('points', 0)} • 💬{u.get('queries_count', 0)}\n"
+        f"   🗓 {esc((u.get('joined_at') or '—')[:16])} • 👁 {ago(u.get('last_seen'))}"
     )
 
 
+HINT = "👆 <b>Ism</b> — boshqarish (premium, xabar, ban…) • <b>🆔 raqam</b> — Telegram profili • pastdagi raqamli tugmalar ham boshqarishni ochadi"
+
+
 def panel_content(panel: str, flt: str):
-    """Qaytaradi: (sarlavha, kirish matni, elementlar ro'yxati)"""
+    """Qaytaradi: (sarlavha, kirish matni, qatorlar, har qator uchun foydalanuvchi ID'si yoki None)"""
     if panel == "users":
         items = sorted(users.items(), key=lambda x: x[1].get("joined_ts") or 0)  # avval qo'shilganlar birinchi
         if flt == "prem":
@@ -2831,50 +2896,55 @@ def panel_content(panel: str, flt: str):
         elif flt == "nouser":
             items = [i for i in items if not i[1].get("username")]
         lines = [user_line(n, k, u) for n, (k, u) in enumerate(items, 1)]
-        return (f"👥 <b>Foydalanuvchilar</b> — {len(items)} ta (jami bazada {len(users)})",
-                "Ism ustiga bossangiz — Telegram profili ochiladi. <code>/u_ID</code> — boshqaruv.", lines)
+        return (f"👥 <b>Foydalanuvchilar</b> — {len(items)} ta (jami bazada {len(users)})", HINT, lines, [k for k, _ in items])
 
     if panel == "recent":
-        act = sorted(((k, u) for k, u in users.items() if u.get("last_seen")), key=lambda x: x[1]["last_seen"], reverse=True)[:60]
+        act = sorted(((k, u) for k, u in users.items() if u.get("last_seen")), key=lambda x: x[1]["last_seen"], reverse=True)
         lines = []
         for n, (k, u) in enumerate(act, 1):
             online = "🟢" if time.time() - u["last_seen"] < 300 else ("🟡" if time.time() - u["last_seen"] < 3600 else "⚪️")
             lines.append(
                 f"{online} <b>{n}.</b> {user_link(k, u.get('full_name'))} • {esc(uname_of(u))}\n"
-                f"   ⏱ {ago(u['last_seen'])} • 🧭 {esc(u.get('mode', ''))}\n"
-                f"   💭 <i>{esc(clip(u.get('last_query') or 'hali savol bermagan', 70))}</i> • /u_{k}"
+                f"   {prof_link(k)} • ⏱ {ago(u['last_seen'])} • 🧭 {esc(u.get('mode', ''))}\n"
+                f"   💭 <i>{esc(clip(u.get('last_query') or 'hali savol bermagan', 70))}</i>"
             )
-        return ("🟢 <b>Yaqindagi faollar</b>", "Eng oxirgi faol bo'lgan 60 kishi — 🟢 hozir • 🟡 1 soat ichida • ⚪️ oldinroq", lines)
+        return (f"🟢 <b>Yaqindagi faollar</b> — {len(lines)} ta",
+                "🟢 hozir • 🟡 1 soat ichida • ⚪️ oldinroq\n" + HINT, lines, [k for k, _ in act])
 
     if panel == "blocked":
         if flt == "banned":
             items = [(k, u) for k, u in users.items() if u.get("banned")]
-            lines = [f"⛔ <b>{n}.</b> {user_link(k, u.get('full_name'))} • {esc(uname_of(u))} • <code>{k}</code>\n   👉 /u_{k} (blokdan chiqarish)" for n, (k, u) in enumerate(items, 1)]
-            return (f"⛔ <b>Siz ban qilganlar</b> — {len(items)} ta", "Bu foydalanuvchilarni siz cheklagansiz.", lines)
+            lines = [
+                f"⛔ <b>{n}.</b> {user_link(k, u.get('full_name'))} • {esc(uname_of(u))}\n"
+                f"   {prof_link(k)}\n"
+                f"   ✅ Blokdan chiqarish uchun ismni bosing"
+                for n, (k, u) in enumerate(items, 1)
+            ]
+            return (f"⛔ <b>Siz ban qilganlar</b> — {len(items)} ta", "Bu foydalanuvchilarni siz cheklagansiz.\n" + HINT, lines, [k for k, _ in items])
         items = sorted(((k, u) for k, u in users.items() if u.get("bot_blocked")), key=lambda x: x[1].get("blocked_ts") or 0)  # avval bloklaganlar birinchi
         lines = []
         for n, (k, u) in enumerate(items, 1):
             stayed = dur((u.get("blocked_ts") or time.time()) - (u.get("joined_ts") or 0)) if u.get("joined_ts") else "—"
             lines.append(
                 f"🚫 <b>{n}.</b> {user_link(k, u.get('full_name'))} • {esc(uname_of(u))}\n"
-                f"   🆔 <code>{k}</code>\n"
+                f"   {prof_link(k)} • 💬 {u.get('queries_count', 0)} ta savol\n"
                 f"   🕒 Bloklagan: {esc(u.get('blocked_at') or 'aniq emas')} ({ago(u.get('blocked_ts'))})\n"
-                f"   📉 Biz bilan: {stayed} • 💬 {u.get('queries_count', 0)} ta savol\n"
+                f"   📉 Biz bilan bo'ldi: {stayed}\n"
                 f"   💭 <i>{esc(clip(u.get('last_query') or '—', 60))}</i>"
             )
         return (f"🚫 <b>Botni bloklaganlar</b> — {len(items)} ta",
-                "Afsus, bu odamlar botni tark etishgan 😔 Ular qaytib kelsa (blokdan chiqarsa), ro'yxatdan o'zi chiqib ketadi.", lines)
+                "Eski bloklaganlarni ham topish uchun pastdagi «Hammasini tekshirib aniqlash» tugmasini bosing 😔\n" + HINT,
+                lines, [k for k, _ in items])
 
     if panel == "questions":
         lines = []
         for n, q in enumerate(queries_log, 1):
-            u = users.get(str(q["uid"]), {})
             lines.append(
                 f"💬 <b>{n}.</b> {user_link(q['uid'], q.get('name'))} • {esc(('@' + q['username']) if q.get('username') else 'username yo‘q')}\n"
-                f"   🕒 {esc(q['time'])} • 🧭 {esc(q.get('mode', ''))}\n"
+                f"   {prof_link(q['uid'])} • 🕒 {esc(q['time'])} • 🧭 {esc(q.get('mode', ''))}\n"
                 f"   ❓ <i>{esc(clip(q['text'], 180))}</i>"
             )
-        return ("💬 <b>Kim nima so'radi</b>", "Oxirgi savollar (eng yangisi tepada). Matnlarni foydalanuvchi yaxshiroq xizmat olishi uchun ko'ring 🙂", lines)
+        return ("💬 <b>Kim nima so'radi</b>", "Oxirgi savollar (eng yangisi tepada).\n" + HINT, lines, [str(q["uid"]) for q in queries_log])
 
     if panel == "leads":
         kind_names = {
@@ -2889,10 +2959,11 @@ def panel_content(panel: str, flt: str):
             prem = "💎 allaqachon premium" if u.get("status") in ("Premium", "VIP") else "🆓 hali premium emas"
             lines.append(
                 f"{hot} <b>{n}.</b> {user_link(k, u.get('full_name'))} • {esc(uname_of(u))}\n"
-                f"   {parts}\n   ⏱ {ago(u.get('last_interest'))} • {prem} • /u_{k}"
+                f"   {prof_link(k)} • ⏱ {ago(u.get('last_interest'))}\n"
+                f"   {parts}\n   {prem}"
             )
         return ("🔥 <b>Qiziqqanlar (potensial xaridorlar)</b>",
-                "Rasm yaratish, video tahlil, Stars, Premium va Gemini'ga qiziqqanlar. 🔥 — buyurtma bergan, 👀 — faqat ko'rgan.", lines)
+                "🔥 — buyurtma bergan, 👀 — faqat ko'rgan.\n" + HINT, lines, [k for k, _ in items])
 
     if panel == "purchases":
         items = [r for r in purchases if flt == "all" or r["status"] == "pending"]
@@ -2900,10 +2971,13 @@ def panel_content(panel: str, flt: str):
         lines = [
             f"{icons.get(r['status'], '•')} <b>#{r['id']}</b> • {esc(r['service'])}\n"
             f"   👤 {user_link(r['uid'], r.get('full_name'))} • {esc(('@' + r['username']) if r.get('username') else 'username yo‘q')}\n"
-            f"   🧾 {esc(r['details'])}\n   🕒 {esc(r['time'])} • {'📸 chek bor' if r.get('receipt_at') else '⏳ chek yo‘q'} • 👉 /r_{r['id']}"
+            f"   {prof_link(r['uid'])} • 🕒 {esc(r['time'])}\n"
+            f"   🧾 {esc(r['details'])}\n"
+            f"   {'📸 chek bor' if r.get('receipt_at') else '⏳ chek yo‘q'} • 👉 /r_{r['id']}"
             for r in items
         ]
-        return (f"🛒 <b>Xarid so'rovlari</b> — {len(items)} ta", "Har bir so'rovni /r_raqam orqali tasdiqlash yoki rad etish mumkin.", lines)
+        return (f"🛒 <b>Xarid so'rovlari</b> — {len(items)} ta",
+                "Har bir so'rovni /r_raqam orqali tasdiqlash yoki rad etish mumkin.\n" + HINT, lines, [str(r["uid"]) for r in items])
 
     if panel == "referrals":
         top = sorted(((k, u) for k, u in users.items() if u.get("referrals_count", 0) > 0), key=lambda x: x[1]["referrals_count"], reverse=True)[:5]
@@ -2916,23 +2990,24 @@ def panel_content(panel: str, flt: str):
             f"➕ {user_link(r['new_user_id'], r.get('new_user_name'))} ← {user_link(r['inviter_id'], r.get('inviter_name'))}\n   🕒 {esc(r['time'])}"
             for r in referrals_log
         ]
-        return ("🎁 <b>Referral tarixi</b>", top_txt + "Kim kimni taklif qilgani:", lines)
+        return ("🎁 <b>Referral tarixi</b>", top_txt + "Kim kimni taklif qilgani:", lines, [None] * len(lines))
 
     if panel == "feedbacks":
         lines = [
             f"✍️ {user_link(f['uid'], f.get('full_name'))} • {esc(('@' + f['username']) if f.get('username') else 'username yo‘q')}\n"
-            f"   🕒 {esc(f['time'])}\n   💌 <i>{esc(clip(f['text'], 500))}</i>"
+            f"   {prof_link(f['uid'])} • 🕒 {esc(f['time'])}\n"
+            f"   💌 <i>{esc(clip(f['text'], 500))}</i>"
             for f in feedbacks
         ]
-        return ("✍️ <b>Fikr va takliflar</b>", "Foydalanuvchilar sizga yozgan so'zlar:", lines)
+        return ("✍️ <b>Fikr va takliflar</b>", "Foydalanuvchilar sizga yozgan so'zlar:\n" + HINT, lines, [str(f["uid"]) for f in feedbacks])
 
-    return ("❔", "", [])
+    return ("❔", "", [], [])
 
 
 EMPTY_TEXTS = {
     "users": "Hali hech kim yo'q. Birinchi foydalanuvchini kutamiz 🌱",
     "recent": "Hozircha faollik yo'q 😴",
-    "blocked": "Ajoyib xabar — hech kim botni bloklamagan! 🎉",
+    "blocked": "Hozircha bloklagan aniqlanmadi. Pastdagi tugma bilan hammani tekshirib ko'ring 🔎",
     "questions": "Hali savol berilmagan 🤫",
     "leads": "Hozircha hech kim premium funksiyalarga qiziqmagan.",
     "purchases": "Kutilayotgan buyurtma yo'q ✨",
@@ -2941,29 +3016,58 @@ EMPTY_TEXTS = {
 }
 
 
+def paginate(lines, budget: int = 3300):
+    """Elementlar soniga emas, matn hajmiga qarab sahifalaydi — hech kim tushib qolmaydi. Sahifa = qator indekslari."""
+    pages, cur, size = [], [], 0
+    for i, ln in enumerate(lines):
+        add = len(ln) + 2
+        if cur and size + add > budget:
+            pages.append(cur)
+            cur, size = [], 0
+        cur.append(i)
+        size += add
+    if cur:
+        pages.append(cur)
+    return pages or [[]]
+
+
 def render_panel(panel: str, flt: str, page: int):
-    title, intro, lines = panel_content(panel, flt)
-    per = PER_PAGE.get(panel, 8)
-    pages = max(1, math.ceil(len(lines) / per))
-    page = max(0, min(page, pages - 1))
-    chunk = lines[page * per:(page + 1) * per]
-    body = "\n\n".join(chunk) if chunk else f"<i>{EMPTY_TEXTS.get(panel, 'Bo‘sh')}</i>"
-    text = f"{title}\n{intro}\n\n{body}\n\n📄 Sahifa {page + 1}/{pages}"
-    while len(text) > 4000 and chunk:  # Telegram limitidan oshib ketmasligi uchun
-        chunk.pop()
-        body = "\n\n".join(chunk)
-        text = f"{title}\n{intro}\n\n{body}\n\n📄 Sahifa {page + 1}/{pages} (qisqartirildi)"
+    title, intro, lines, uids = panel_content(panel, flt)
+    pages = paginate(lines)
+    total = len(pages)
+    page = max(0, min(page, total - 1))
+    chunk = pages[page]
+    body = "\n\n".join(lines[i] for i in chunk) if chunk else f"<i>{EMPTY_TEXTS.get(panel, 'Bo‘sh')}</i>"
+    text = f"{title}\n{intro}\n\n{body}\n\n📄 Sahifa {page + 1}/{total} • jami {len(lines)} ta"
     rows = []
     if panel in PANEL_FILTERS:
-        rows.append([((f"✔ {label}" if key == flt else label), f"adm|{panel}|{key}|0") for key, label in PANEL_FILTERS[panel]])
+        rows.append([
+            ((f"✔ {label}", f"adm|{panel}|{key}|0", "success") if key == flt
+             else (label, f"adm|{panel}|{key}|0", "primary"))
+            for key, label in PANEL_FILTERS[panel]
+        ])
+    # shu sahifadagi foydalanuvchilar uchun «boshqarish» tugmalari (ism bosilgandagi bilan bir xil oyna)
+    cells, seen = [], set()
+    for i in chunk:
+        k = uids[i] if i < len(uids) else None
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        name = (users.get(str(k)) or {}).get("full_name") or f"ID {k}"
+        cells.append((f"{i + 1}. {clip(name, 12)}", f"adm|u|{k}|0"))
+        if len(cells) >= 12:
+            break
+    rows += [cells[j:j + 2] for j in range(0, len(cells), 2)]
+    if panel == "blocked":
+        rows.append([("🔎 Hammasini tekshirib aniqlash", "adm|scan|x|0", "primary")])
     nav = []
     if page > 0:
-        nav.append(("⬅️", f"adm|{panel}|{flt}|{page - 1}"))
-    nav.append((f"{page + 1}/{pages}", "adm|noop|x|0"))
-    if page < pages - 1:
-        nav.append(("➡️", f"adm|{panel}|{flt}|{page + 1}"))
+        nav.append(("⬅️", f"adm|{panel}|{flt}|{page - 1}", "primary"))
+    nav.append((f"{page + 1}/{total}", "adm|noop|x|0", "primary"))
+    if page < total - 1:
+        nav.append(("➡️", f"adm|{panel}|{flt}|{page + 1}", "primary"))
     rows.append(nav)
-    rows.append([("🔄 Yangilash", f"adm|{panel}|{flt}|{page}")])
+    rows.append([("🔄 Yangilash", f"adm|{panel}|{flt}|{page}", "success")])
     return text, ikb(rows)
 
 
@@ -2975,11 +3079,68 @@ async def open_panel(message: Message, panel: str):
     await safe_answer(message, text, kb)
 
 
+async def scan_blocked(admin_id: int):
+    """Hamma foydalanuvchiga ko'rinmas «typing» signali yuborib, kim botni bloklaganini aniq topadi (xabar bormaydi)."""
+    if admin_id in SCAN_RUNNING:
+        return
+    SCAN_RUNNING.add(admin_id)
+    try:
+        keys = [k for k, u in users.items() if not u.get("banned")]
+        await bot.send_message(admin_id, f"🔎 Tekshiruv boshlandi — {len(keys)} ta foydalanuvchi. Ko'p bo'lsa bir necha daqiqa ketadi…")
+        ok = blocked = returned = other = 0
+        for k in keys:
+            tid = int(k)
+            for _ in range(3):
+                try:
+                    await bot.send_chat_action(tid, ChatAction.TYPING)
+                    ok += 1
+                    if mark_unblocked(tid):
+                        returned += 1
+                    break
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except TelegramForbiddenError:
+                    mark_blocked(tid)
+                    blocked += 1
+                    break
+                except TelegramBadRequest:  # akkaunt o'chirilgan / chat topilmadi
+                    mark_blocked(tid)
+                    other += 1
+                    break
+                except Exception:
+                    break
+            await asyncio.sleep(0.05)
+        touch("users")
+        await bot.send_message(
+            admin_id,
+            f"✅ <b>Tekshiruv tugadi</b>\n\n👥 Tekshirildi: {len(keys)}\n🟢 Faol: {ok}\n🚫 Bloklagan: {blocked}\n"
+            f"👻 Akkaunti o'chgan/topilmadi: {other}\n↩️ Blokdan qaytgan: {returned}\n\n"
+            "🚫 BLOKLAGANLAR bo'limini yangilab ko'ring.",
+            reply_markup=ADMIN_KB,
+        )
+    except Exception as e:
+        log.warning("scan error: %s", e)
+    finally:
+        SCAN_RUNNING.discard(admin_id)
+
+
 @dp.callback_query(F.data.startswith("adm|"), AdminOnly())
 async def cb_admin_panel(cb: CallbackQuery):
     _, panel, flt, page = cb.data.split("|")
     if panel == "noop":
         await cb.answer()
+        return
+    if panel == "u":
+        text, kb = user_detail(flt)
+        await send_html(cb.message, text, kb)
+        await cb.answer()
+        return
+    if panel == "scan":
+        if cb.from_user.id in SCAN_RUNNING:
+            await cb.answer("Tekshiruv allaqachon ketyapti…", show_alert=True)
+            return
+        await cb.answer("Tekshiruv boshlandi…")
+        spawn(scan_blocked(cb.from_user.id))
         return
     text, kb = render_panel(panel, flt, int(page))
     try:
@@ -3114,28 +3275,37 @@ async def cancel_cmd(message: Message):
 def user_detail(uid_str: str):
     u = users.get(uid_str)
     if not u:
-        return "Topilmadi", None
+        return "🤷 Foydalanuvchi topilmadi.", None
     uid = int(uid_str)
     recent_q = [q for q in queries_log if q["uid"] == uid][:5]
     q_txt = "\n".join(f"   • <i>{esc(clip(q['text'], 90))}</i>" for q in recent_q) or "   —"
     interest = ", ".join(f"{k}×{v}" for k, v in u.get("interest", {}).items()) or "—"
     lvl, title, _ = level_of(u.get("points", 0))
+    fname = u.get("full_name") or f"ID {uid_str}"
+    status = u.get("status") or "Standart"
+    joined = u.get("joined_at") or "noma'lum"
+    blocked_note = f" ({esc(u.get('blocked_at'))})" if u.get("bot_blocked") and u.get("blocked_at") else ""
     text = (
-        f"👤 <b>{user_link(uid_str, u.get('full_name'))}</b> • {esc(uname_of(u))}\n"
-        f"🆔 <code>{uid_str}</code>\n"
-        f"🏷 Status: <b>{esc(u.get('status'))}</b> • {title} (Lv{lvl}) • ⭐{u.get('points', 0)} XP\n"
+        f'👤 <b><a href="tg://user?id={uid_str}">{esc(clip(fname, 40))}</a></b> • {esc(uname_of(u))}\n'
+        f"{prof_link(uid_str)}\n\n"
+        f"🏷 Status: <b>{esc(status)}</b>\n"
+        f"🎖 {title} (Lv{lvl}) • ⭐{u.get('points', 0)} XP\n"
         f"💬 Savollar: <b>{u.get('queries_count', 0)}</b> • 🔥 Seriya: {u.get('streak', 0)} • 🎁 Referral: {u.get('referrals_count', 0)}\n"
-        f"🗓 Qo'shilgan: {esc(u.get('joined_at'))}\n"
+        f"🗓 Qo'shilgan: {esc(joined)}\n"
         f"👁 Oxirgi faollik: {ago(u.get('last_seen'))}\n"
         f"🧭 Rejim: {esc(u.get('mode'))} • AI: {esc(u.get('provider'))} • oxirgi: {esc(u.get('last_provider') or '—')}\n"
-        f"🚫 Bot bloklangan: <b>{'ha' if u.get('bot_blocked') else 'yo‘q'}</b>"
-        f"{' (' + esc(u.get('blocked_at')) + ')' if u.get('bot_blocked') else ''} • ⛔ Ban: <b>{'ha' if u.get('banned') else 'yo‘q'}</b>\n"
+        f"🚫 Bot bloklangan: <b>{'ha' if u.get('bot_blocked') else 'yo‘q'}</b>{blocked_note} • ⛔ Ban: <b>{'ha' if u.get('banned') else 'yo‘q'}</b>\n"
         f"🎯 Qiziqishlari: {esc(interest)}\n\n"
         f"💭 <b>Oxirgi savollari:</b>\n{q_txt}"
     )
-    prem_btn = ("💎 Premiumni olib tashlash", f"ad|unprem|{uid_str}") if u.get("status") in ("Premium", "VIP") else ("💎 Premium berish", f"ad|prem|{uid_str}")
-    ban_btn = ("✅ Banni olib tashlash", f"ad|unban|{uid_str}") if u.get("banned") else ("⛔ Ban qilish", f"ad|ban|{uid_str}")
-    kb = ikb([[prem_btn], [ban_btn], [("✉️ Xabar yuborish", f"ad|dm|{uid_str}"), ("➕ +100 XP", f"ad|xp|{uid_str}")]])
+    is_prem = u.get("status") in ("Premium", "VIP")
+    prem_btn = ("Premiumni olib tashlash", f"ad|unprem|{uid_str}", "danger") if is_prem else ("💎 Premium berish", f"ad|prem|{uid_str}", "success")
+    ban_btn = ("Banni olib tashlash", f"ad|unban|{uid_str}", "success") if u.get("banned") else ("⛔ Ban qilish", f"ad|ban|{uid_str}", "danger")
+    kb = ikb([
+        [prem_btn],
+        [ban_btn],
+        [("✉️ Xabar yuborish", f"ad|dm|{uid_str}", "primary"), ("➕ +100 XP", f"ad|xp|{uid_str}", "success")],
+    ])
     return text, kb
 
 
@@ -3154,10 +3324,10 @@ async def admin_req_open(message: Message):
         await message.answer("Bunday buyurtma yo'q.")
         return
     icons = {"pending": "⏳ Kutilmoqda", "done": "✅ Bajarilgan", "rejected": "❌ Rad etilgan"}
-    kb = ikb([[("✅ Bajarildi", f"pr|ok|{rid}"), ("❌ Rad etish", f"pr|no|{rid}")]]) if r["status"] == "pending" else None
+    kb = order_action_kb(rid) if r["status"] == "pending" else None
     await send_html(
         message,
-        f"🛒 <b>Buyurtma #{rid}</b> — {icons.get(r['status'])}\n👤 {user_link(r['uid'], r.get('full_name'))} • <code>{r['uid']}</code>\n"
+        f"🛒 <b>Buyurtma #{rid}</b> — {icons.get(r['status'])}\n👤 {user_link(r['uid'], r.get('full_name'))} • {prof_link(r['uid'])}\n"
         f"📦 {esc(r['service'])}\n🧾 {esc(r['details'])}\n🕒 {esc(r['time'])}",
         kb,
     )
@@ -3193,7 +3363,7 @@ async def cb_admin_user_action(cb: CallbackQuery):
         st = get_user(cb.from_user.id)
         st["admin_action"] = f"dm:{uid_str}"
         touch("users")
-        await cb.message.answer(f"✉️ {esc(u.get('full_name'))} ga yuboriladigan xabarni yozing (/cancel — bekor):")
+        await cb.message.answer(f"✉️ {esc(u.get('full_name') or uid_str)} ga yuboriladigan xabarni yozing (/cancel — bekor):")
         await cb.answer()
         return
     touch("users")
@@ -3206,9 +3376,9 @@ async def cb_admin_user_action(cb: CallbackQuery):
 
 def bc_menu_kb():
     return ikb([
-        [("✅ Hammaga yuborish", "bc|go")],
-        [("👤 Bittasiga yuborish", "bc|one")],
-        [("❌ Bekor qilish / Tugatish", "bc|no")],
+        [("✅ Hammaga yuborish", "bc|go", "success")],
+        [("👤 Bittasiga yuborish", "bc|one", "primary")],
+        [("❌ Bekor qilish / Tugatish", "bc|no", "danger")],
     ])
 
 
@@ -3344,7 +3514,7 @@ async def handle_admin_text(message: Message, st: dict, text: str) -> bool:
         touch("users")
         rows = [[(f"{'🚫 ' if u.get('bot_blocked') else ''}{clip(u.get('full_name') or k, 22)} • {('@' + u['username']) if u.get('username') else k}", f"bc|to|{k}")]
                 for k, u in found]
-        rows.append([("🔁 Boshqa qidirish", "bc|one"), ("❌ Bekor qilish", "bc|no")])
+        rows.append([("🔁 Boshqa qidirish", "bc|one", "primary"), ("❌ Bekor qilish", "bc|no", "danger")])
         await send_html(message, "🔎 <b>Kimga yuboramiz?</b> Tanlang 👇", ikb(rows))
         return True
     if action == "guide_code":
