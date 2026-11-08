@@ -3357,6 +3357,22 @@ async def text_handler(message: Message):
 
 
 # =====================================================================
+# Flask Web Server (Render & UptimeRobot 24/7 ishlashi uchun)
+# =====================================================================
+from threading import Thread
+from flask import Flask
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "EduMind AI Bot is active and running 24/7! 🚀"
+
+def run_web():
+    port = int(os.getenv("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+Thread(target=run_web).start()
 # Entry point
 # =====================================================================
 
