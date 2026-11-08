@@ -1,3 +1,15 @@
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "EduMind AI Bot is running! 🚀"
+
+def run_web():
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 import os
 import io
 import re
@@ -3657,6 +3669,7 @@ async def text_handler(message: Message):
 # =====================================================================
 
 async def main():
+    threading.Thread(target=run_web, daemon=True).start()
     global BOT_USERNAME
     me = await bot.get_me()
     BOT_USERNAME = me.username or ""
