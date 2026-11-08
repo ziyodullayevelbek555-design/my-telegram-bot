@@ -1,4 +1,3 @@
-[main.py](https://github.com/user-attachments/files/34542902/main.py)
 import os
 import io
 import re
