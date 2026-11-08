@@ -9,6 +9,7 @@ import random
 import asyncio
 import logging
 import contextlib
+import shutil
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -139,6 +140,25 @@ REFERRALS_FILE = DATA_DIR / "referrals_log.json"
 QUERIES_FILE = DATA_DIR / "queries_log.json"
 LEADS_FILE = DATA_DIR / "leads.json"
 METRICS_FILE = DATA_DIR / "metrics.json"
+
+def snapshot_data():
+    """Har ishga tushganda data/ ichidagi JSON fayllarning nusxasini data/backup/ ga saqlaydi (oxirgi 10 ta). Tarix yo'qolmasligi uchun."""
+    try:
+        files = [f for f in DATA_DIR.glob("*.json") if f.is_file()]
+        if not files:
+            return
+        dest = DATA_DIR / "backup" / datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            shutil.copy2(f, dest / f.name)
+        snaps = sorted(d for d in (DATA_DIR / "backup").iterdir() if d.is_dir())
+        for old in snaps[:-10]:
+            shutil.rmtree(old, ignore_errors=True)
+    except Exception as e:
+        print("Zaxira nusxa xatosi:", e)
+
+
+snapshot_data()
 
 users: dict = _load(USERS_FILE, {})
 activities: list = _load(ACTIVITIES_FILE, [])
@@ -423,7 +443,7 @@ def log_act(uid: int, action: str, desc: str):
         "time": ts(), "uid": uid, "full_name": u.get("full_name") or f"ID {uid}",
         "username": u.get("username") or "", "action": action, "desc": clip(desc, 160),
     })
-    del activities[1000:]
+    del activities[5000:]
     touch("activities")
 
 
@@ -454,7 +474,7 @@ def add_lead(uid: int, kind: str, note: str = ""):
     prev = st.get("last_interest", 0)
     st["last_interest"] = time.time()
     leads.insert(0, {"time": ts(), "uid": uid, "kind": kind, "note": clip(note, 120)})
-    del leads[600:]
+    del leads[3000:]
     touch("leads", "users")
     return time.time() - prev > 3600  # admin'ga tez-tez xabar bermaslik uchun
 
@@ -601,6 +621,18 @@ def mark_blocked(uid: int):
         st["blocked_at"] = ts()
         touch("users")
         log_act(uid, "BOT_BLOCKED", "Botni bloklagan")
+
+
+def mark_unblocked(uid: int):
+    """Xabar yetib borsa — foydalanuvchi blokdan chiqqan (yoki hech bloklamagan) demak."""
+    st = users.get(str(uid))
+    if st and st.get("bot_blocked"):
+        st["bot_blocked"] = False
+        st["unblocked_ts"] = time.time()
+        touch("users")
+        log_act(uid, "UNBLOCKED", "Xabar yetdi — blokdan chiqqan")
+        return True
+    return False
 
 
 @contextlib.asynccontextmanager
@@ -1173,7 +1205,7 @@ PRODUCT_INFO = {
             "✨ <b>Google Gemini Pro — 18 oylik obuna</b>\n\n"
             "Kuchli AI yordamchi: murakkab savollar, rasm yaratish, video tahlil — o'qish va ish uchun ajoyib vosita.\n\n"
             "🎁 <b>Bonus:</b> buyurtma tasdiqlanishi bilan botimizdagi <b>Premium</b> status ham ochiladi — rasm yaratish va video tahlil sizniki!\n"
-            "💰 Narx: <b79 000 so'm / oy</b>"
+            "💰 Narx: <b>79 000 so'm / oy</b>"
         ),
         "faq": [
             ("Botdagi Premium qachon ochiladi?", "Admin buyurtmangizni tasdiqlashi bilan avtomatik ochiladi va sizga xabar keladi 🎉"),
@@ -1536,6 +1568,11 @@ async def premium_pitch(message: Message, feature: str):
             f"🎥 Video keldi, {first}! Uni tahlil qilish Premium'da ishlaydi ✨\n\n"
             "Obuna olsangiz video tahlil + rasm yaratish ochiladi. Hozircha esa skrinshot yuboring — bepul tahlil qilaman 📸",
         ])
+    price = PRODUCTS["gemini"]["opts"][0][1]  # narx botdagi Gemini narxidan olinadi
+    text += (
+        f"\n\n💎 <b>Premium narxi: {esc(price)}</b>\n"
+        "Pastdagi tugmani bosing — karta ma'lumotlari darrov chiqadi. To'lab, chek skrinshotini yuborasiz, admin tasdiqlashi bilan Premium ochiladi 🙌"
+    )
     if add_lead(uid, "image_gen" if feature == "image" else "video", "Premium funksiyaga urindi"):
         st = get_user(uid)
         await notify_admins(
@@ -2570,10 +2607,16 @@ async def broadcast_capture(message: Message):
     st["admin_action"] = None
     touch("users")
     pending_broadcast[uid] = (message.chat.id, message.message_id)
-    targets = sum(1 for u in users.values() if not u.get("bot_blocked") and not u.get("banned"))
+    total = sum(1 for u in users.values() if not u.get("banned"))
+    was_blocked = sum(1 for u in users.values() if u.get("bot_blocked") and not u.get("banned"))
+    note = (
+        f"\n🚫 Shundan <b>{was_blocked}</b> tasi avval botni bloklagan — ularga ham urinib ko'riladi: blokdan chiqqan bo'lsa xabar yetadi, "
+        "hali bloklagan bo'lsa ro'yxatda qoladi."
+    ) if was_blocked else ""
     await message.answer(
-        f"📢 Yuqoridagi xabar <b>{targets}</b> ta faol foydalanuvchiga yuboriladi. Tasdiqlaysizmi?",
-        reply_markup=ikb([[("✅ Yuborish", "bc|go"), ("❌ Bekor qilish", "bc|no")]]),
+        f"📢 Yuqoridagi xabarni kimga yuboramiz?\n\n👥 <b>Hammaga:</b> {total} ta foydalanuvchi (start bosgan hamma){note}\n"
+        "👤 Yoki bitta foydalanuvchini tanlab, faqat unga yuboring.",
+        reply_markup=bc_menu_kb(),
         reply_to_message_id=message.message_id,
     )
 
@@ -3161,44 +3204,105 @@ async def cb_admin_user_action(cb: CallbackQuery):
     await cb.answer(note)
 
 
+def bc_menu_kb():
+    return ikb([
+        [("✅ Hammaga yuborish", "bc|go")],
+        [("👤 Bittasiga yuborish", "bc|one")],
+        [("❌ Bekor qilish / Tugatish", "bc|no")],
+    ])
+
+
 @dp.callback_query(F.data.startswith("bc|"), AdminOnly())
 async def cb_broadcast(cb: CallbackQuery):
     uid = cb.from_user.id
-    action = cb.data.split("|")[1]
-    item = pending_broadcast.pop(uid, None)
-    if action == "no" or not item:
+    st = get_user(uid)
+    parts = cb.data.split("|")
+    action = parts[1]
+    item = pending_broadcast.get(uid)
+    if action == "no":
+        pending_broadcast.pop(uid, None)
+        if st.get("admin_action") == "bc_pick":
+            st["admin_action"] = None
+            touch("users")
         await cb.message.edit_text("❌ Ommaviy xabar bekor qilindi.")
         await cb.answer()
         return
-    await cb.message.edit_text("🚀 Yuborish boshlandi… Tugagach hisobot beraman.")
+    if not item:
+        await cb.message.edit_text("⚠️ Xabar topilmadi (bot qayta ishga tushgan bo'lishi mumkin). 📢 BARCHAGA XABAR orqali qaytadan boshlang.")
+        await cb.answer()
+        return
+    if action == "go":
+        pending_broadcast.pop(uid, None)
+        await cb.message.edit_text("🚀 Yuborish boshlandi… Tugagach hisobot beraman.")
+        await cb.answer()
+        spawn(run_broadcast(uid, item[0], item[1]))
+        return
+    if action == "one":
+        st["admin_action"] = "bc_pick"
+        touch("users")
+        await cb.message.answer("👤 Kimga yuboramiz? <b>ID</b>, <b>@username</b> yoki <b>ism</b> yozing (/cancel — bekor):")
+        await cb.answer()
+        return
+    if action == "to" and len(parts) == 3 and parts[2].isdigit():
+        tid = int(parts[2])
+        u = users.get(str(tid), {})
+        res = await deliver_copy(tid, item[0], item[1])
+        who = f"{user_link(tid, u.get('full_name'))} ({esc(uname_of(u))})"
+        if res == "ok":
+            verdict = f"✅ Yetkazildi: {who}"
+        elif res == "blocked":
+            verdict = f"🚫 {who} botni bloklagan — xabar yetmadi."
+        else:
+            verdict = f"⚠️ Yuborilmadi: {who}\n<code>{esc(res)}</code>"
+        log_act(uid, "BROADCAST_ONE", f"{tid}: {res}")
+        await cb.message.answer(verdict + "\n\nYana kimga yuboramiz?", reply_markup=bc_menu_kb())
+        await cb.answer("Tayyor")
+        return
     await cb.answer()
-    spawn(run_broadcast(uid, item[0], item[1]))
+
+
+async def deliver_copy(tid: int, from_chat: int, msg_id: int) -> str:
+    """Bitta foydalanuvchiga nusxa yuboradi va blok holatini yangilaydi. Natija: 'ok' | 'blocked' | 'fail:<sabab>'."""
+    for _ in range(2):
+        try:
+            await bot.copy_message(tid, from_chat, msg_id)
+            mark_unblocked(tid)
+            return "ok"
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except TelegramForbiddenError:
+            mark_blocked(tid)
+            return "blocked"
+        except Exception as e:
+            return f"fail:{clip(e, 80)}"
+    return "fail:juda ko'p so'rov (keyinroq urinib ko'ring)"
 
 
 async def run_broadcast(admin_id: int, from_chat: int, msg_id: int):
-    targets = [int(k) for k, u in users.items() if not u.get("bot_blocked") and not u.get("banned")]
-    sent = failed = newly_blocked = 0
+    # Start bosgan HAMMA (avval bloklaganlar ham): blokdan chiqqanlarga xabar yetadi, hali bloklaganlar ro'yxatda qoladi.
+    targets = [int(k) for k, u in users.items() if not u.get("banned")]
+    sent = failed = newly_blocked = still_blocked = returned = 0
     for tid in targets:
-        for attempt in range(2):
-            try:
-                await bot.copy_message(tid, from_chat, msg_id)
-                sent += 1
-                break
-            except TelegramRetryAfter as e:
-                await asyncio.sleep(e.retry_after + 1)
-            except TelegramForbiddenError:
-                mark_blocked(tid)
+        was_flagged = bool(users.get(str(tid), {}).get("bot_blocked"))
+        res = await deliver_copy(tid, from_chat, msg_id)
+        if res == "ok":
+            sent += 1
+            if was_flagged:
+                returned += 1
+        elif res == "blocked":
+            if was_flagged:
+                still_blocked += 1
+            else:
                 newly_blocked += 1
-                break
-            except Exception:
-                failed += 1
-                break
+        else:
+            failed += 1
         await asyncio.sleep(0.04)
-    log_act(admin_id, "BROADCAST", f"jami {len(targets)}, ok {sent}, blok {newly_blocked}")
+    log_act(admin_id, "BROADCAST", f"jami {len(targets)}, ok {sent}, yangi blok {newly_blocked}, qaytgan {returned}")
     touch("users")
     await bot.send_message(
         admin_id,
-        f"📢 <b>Ommaviy xabar yakunlandi!</b>\n\n👥 Maqsad: {len(targets)}\n✅ Yetkazildi: {sent}\n🚫 Yangi bloklaganlar: {newly_blocked}\n⚠️ Xato: {failed}",
+        f"📢 <b>Ommaviy xabar yakunlandi!</b>\n\n👥 Maqsad: {len(targets)}\n✅ Yetkazildi: {sent}\n"
+        f"↩️ Blokdan chiqqanlar (qaytganlar): {returned}\n🚫 Yangi bloklaganlar: {newly_blocked}\n🔒 Hali ham bloklagan: {still_blocked}\n⚠️ Xato: {failed}",
         reply_markup=ADMIN_KB,
     )
 
@@ -3206,6 +3310,10 @@ async def run_broadcast(admin_id: int, from_chat: int, msg_id: int):
 # =====================================================================
 # Main text handler
 # =====================================================================
+
+def st_pending_missing(admin_id: int) -> bool:
+    return admin_id not in pending_broadcast
+
 
 async def handle_admin_text(message: Message, st: dict, text: str) -> bool:
     action = st.get("admin_action")
@@ -3220,6 +3328,24 @@ async def handle_admin_text(message: Message, st: dict, text: str) -> bool:
             await send_html(message, "🤷 Hech kim topilmadi.", ADMIN_KB)
         else:
             await send_html(message, "🔎 <b>Topilganlar:</b>\n\n" + "\n\n".join(user_line(i, k, u) for i, (k, u) in enumerate(found, 1)), ADMIN_KB)
+        return True
+    if action == "bc_pick":
+        if st_pending_missing(message.from_user.id):
+            st["admin_action"] = None
+            touch("users")
+            await send_html(message, "⚠️ Yuboriladigan xabar topilmadi. 📢 BARCHAGA XABAR orqali qaytadan boshlang.", ADMIN_KB)
+            return True
+        q = text.lstrip("@").strip().lower()
+        found = [(k, u) for k, u in users.items() if q and (q == k or q == (u.get("username") or "").lower() or q in (u.get("full_name") or "").lower())][:8]
+        if not found:
+            await send_html(message, "🤷 Hech kim topilmadi. Boshqa ID, @username yoki ism yozing (yoki /cancel):", ADMIN_KB)
+            return True
+        st["admin_action"] = None
+        touch("users")
+        rows = [[(f"{'🚫 ' if u.get('bot_blocked') else ''}{clip(u.get('full_name') or k, 22)} • {('@' + u['username']) if u.get('username') else k}", f"bc|to|{k}")]
+                for k, u in found]
+        rows.append([("🔁 Boshqa qidirish", "bc|one"), ("❌ Bekor qilish", "bc|no")])
+        await send_html(message, "🔎 <b>Kimga yuboramiz?</b> Tanlang 👇", ikb(rows))
         return True
     if action == "guide_code":
         st["temp_guide_code"] = re.sub(r"\W+", "", text.lower())[:30] or str(int(time.time()))
@@ -3333,7 +3459,7 @@ async def text_handler(message: Message):
     mode = st.get("mode", "ai_tutor")
     log_act(uid, f"AI_QUERY", f"[{mode}] {text}")
     queries_log.insert(0, {"time": ts(), "uid": uid, "name": st.get("full_name"), "username": st.get("username"), "mode": mode, "text": clip(text, 400)})
-    del queries_log[500:]
+    del queries_log[5000:]
     touch("queries")
 
     BUSY.add(uid)
@@ -3357,22 +3483,6 @@ async def text_handler(message: Message):
 
 
 # =====================================================================
-# Flask Web Server (Render & UptimeRobot 24/7 ishlashi uchun)
-# =====================================================================
-from threading import Thread
-from flask import Flask
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "EduMind AI Bot is active and running 24/7! 🚀"
-
-def run_web():
-    port = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
-
-Thread(target=run_web).start()
 # Entry point
 # =====================================================================
 
