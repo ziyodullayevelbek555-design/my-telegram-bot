@@ -63,7 +63,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_PROVIDER = os.getenv("AI_DEFAULT_PROVIDER", "gemini").lower()
 AUTO_FALLBACK = os.getenv("AI_AUTO_FALLBACK", "true").lower() == "true"
-ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "6841567673").split(",") if x.strip().isdigit()}
+ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "8579962675").split(",") if x.strip().isdigit()}
 try:
     TZ = ZoneInfo(os.getenv("BOT_TZ", "Asia/Tashkent"))
 except Exception:  # Windows'da tzdata o'rnatilmagan bo'lsa: pip install tzdata
